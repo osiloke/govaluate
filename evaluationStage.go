@@ -247,19 +247,31 @@ func makeFunctionStage(function ExpressionFunction) evaluationOperator {
 	}
 }
 
-func makeAccessorStage(pair []string) evaluationOperator {
+func recurseGetParameterVal(pairs []string, parameters Parameters) (interface{}, error) {
+	first := pairs[0]
+	value, err := parameters.Get(first)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range pairs[1:] {
+		if v, ok := value.(Parameters); ok {
+			value, err = v.Get(name)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return value, nil
+}
+func makeAccessorStage(pairs []string) evaluationOperator {
 
-	reconstructed := strings.Join(pair, ".")
+	reconstructed := strings.Join(pairs, ".")
 
 	return func(left interface{}, right interface{}, parameters Parameters) (ret interface{}, err error) {
-
-		var params []reflect.Value
-
-		value, err := parameters.Get(pair[0])
+		value, err := recurseGetParameterVal(pairs, parameters)
 		if err != nil {
 			return nil, err
 		}
-
 		// while this library generally tries to handle panic-inducing cases on its own,
 		// accessors are a sticky case which have a lot of possible ways to fail.
 		// therefore every call to an accessor sets up a defer that tries to recover from panics, converting them to errors.
@@ -270,86 +282,6 @@ func makeAccessorStage(pair []string) evaluationOperator {
 				ret = nil
 			}
 		}()
-
-		for i := 1; i < len(pair); i++ {
-
-			coreValue := reflect.ValueOf(value)
-
-			var corePtrVal reflect.Value
-
-			// if this is a pointer, resolve it.
-			if coreValue.Kind() == reflect.Ptr {
-				corePtrVal = coreValue
-				coreValue = coreValue.Elem()
-			}
-
-			if coreValue.Kind() != reflect.Struct {
-				return nil, errors.New("Unable to access '" + pair[i] + "', '" + pair[i-1] + "' is not a struct")
-			}
-
-			field := coreValue.FieldByName(pair[i])
-			if field != (reflect.Value{}) {
-				value = field.Interface()
-				continue
-			}
-
-			method := coreValue.MethodByName(pair[i])
-			if method == (reflect.Value{}) {
-				if corePtrVal.IsValid() {
-					method = corePtrVal.MethodByName(pair[i])
-				}
-				if method == (reflect.Value{}) {
-					return nil, errors.New("No method or field '" + pair[i] + "' present on parameter '" + pair[i-1] + "'")
-				}
-			}
-
-			switch right.(type) {
-			case []interface{}:
-
-				givenParams := right.([]interface{})
-				params = make([]reflect.Value, len(givenParams))
-				for idx, _ := range givenParams {
-					params[idx] = reflect.ValueOf(givenParams[idx])
-				}
-
-			default:
-
-				if right == nil {
-					params = []reflect.Value{}
-					break
-				}
-
-				params = []reflect.Value{reflect.ValueOf(right.(interface{}))}
-			}
-
-			returned := method.Call(params)
-			retLength := len(returned)
-
-			if retLength == 0 {
-				return nil, errors.New("Method call '" + pair[i-1] + "." + pair[i] + "' did not return any values.")
-			}
-
-			if retLength == 1 {
-
-				value = returned[0].Interface()
-				continue
-			}
-
-			if retLength == 2 {
-
-				errIface := returned[1].Interface()
-				err, validType := errIface.(error)
-
-				if validType && errIface != nil {
-					return returned[0].Interface(), err
-				}
-
-				value = returned[0].Interface()
-				continue
-			}
-
-			return nil, errors.New("Method call '" + pair[0] + "." + pair[1] + "' did not return either one value, or a value and an error. Cannot interpret meaning.")
-		}
 
 		value = castFixedPoint(value)
 		return value, nil
